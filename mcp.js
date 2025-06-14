@@ -67,6 +67,61 @@ function detectFrameworkFromQuery(query) {
   return null;
 }
 
+// Sistema de prioridades para archivos
+function getFilePriority(filePath) {
+  const path = filePath.toLowerCase();
+  
+  // Prioridad alta (10 puntos)
+  if (path.includes('index.md') || path.includes('getting-started') || 
+      path.includes('installation') || path.includes('configuration')) {
+    return 10;
+  }
+  
+  // Prioridad media-alta (8 puntos)  
+  if (path.includes('1_index.md') || path.includes('2_installation') ||
+      path.includes('modules') || path.includes('routing') || 
+      path.includes('controllers') || path.includes('models')) {
+    return 8;
+  }
+  
+  // Prioridad media (5 puntos)
+  if (path.includes('forms') || path.includes('database') ||
+      path.includes('authentication') || path.includes('components')) {
+    return 5;
+  }
+  
+  // Prioridad baja (2 puntos)
+  return 2;
+}
+
+// Extraer fragmentos relevantes del contenido
+function extractRelevantFragment(content, query, maxLength = 800) {
+  const lines = content.split('\n');
+  const queryWords = query.toLowerCase().split(' ').filter(w => w.length > 2);
+  
+  let bestFragment = '';
+  let bestScore = 0;
+  
+  // Buscar el fragmento con más coincidencias
+  for (let i = 0; i < lines.length; i++) {
+    const fragment = lines.slice(Math.max(0, i - 3), Math.min(lines.length, i + 10)).join('\n');
+    
+    if (fragment.length > maxLength) continue;
+    
+    const fragmentLower = fragment.toLowerCase();
+    const score = queryWords.reduce((acc, word) => {
+      return acc + (fragmentLower.includes(word) ? 1 : 0);
+    }, 0);
+    
+    if (score > bestScore) {
+      bestScore = score;
+      bestFragment = fragment;
+    }
+  }
+  
+  return bestFragment || content.substring(0, maxLength) + '...';
+}
+
 function log(msg) {
   console.error("🔧", msg);
 }
@@ -199,7 +254,7 @@ class FrameworkDocsServer {
           },
           {
             name: "search_docs",
-            description: "Buscar en la documentación de todos los frameworks por contenido",
+            description: "Buscar en la documentación (resultados optimizados con fragmentos relevantes)",
             inputSchema: {
               type: "object",
               properties: {
@@ -213,6 +268,24 @@ class FrameworkDocsServer {
                 },
               },
               required: ["query"],
+            },
+          },
+          {
+            name: "get_full_content",
+            description: "Obtener el contenido completo de un archivo específico",
+            inputSchema: {
+              type: "object",
+              properties: {
+                framework: {
+                  type: "string",
+                  description: "Framework: twill, laravel, next, inertia, tailwind",
+                },
+                file_path: {
+                  type: "string",
+                  description: "Ruta relativa del archivo (ej: 'modules/1_index.md')",
+                },
+              },
+              required: ["framework", "file_path"],
             },
           },
           {
@@ -270,6 +343,9 @@ class FrameworkDocsServer {
         case "search_docs":
           return await this.searchDocs(args.query, args.framework);
         
+        case "get_full_content":
+          return await this.getFullContent(args.framework, args.file_path);
+        
         case "list_frameworks":
           return await this.listFrameworks();
         
@@ -283,6 +359,51 @@ class FrameworkDocsServer {
           throw new Error(`Herramienta desconocida: ${name}`);
       }
     });
+  }
+
+  async getFullContent(framework, filePath) {
+    await this.initialize();
+    
+    // Buscar el archivo
+    const baseDir = DOCS_DIRS.find(dir => path.basename(dir) === framework);
+    
+    if (!baseDir) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ **Error:** Framework "${framework}" no encontrado. Usa la herramienta "list_frameworks" para ver los frameworks disponibles.`,
+          },
+        ],
+      };
+    }
+    
+    // Construir ruta completa
+    const fullPath = path.join(baseDir, filePath);
+    
+    if (!fs.existsSync(fullPath)) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `❌ **Error:** Archivo "${filePath}" no encontrado en el framework "${framework}".`,
+          },
+        ],
+      };
+    }
+    
+    // Leer contenido completo
+    const content = fs.readFileSync(fullPath, "utf8");
+    const fileSize = content.length;
+    
+    return {
+      content: [
+        {
+          type: "text",
+          text: `📄 **Contenido completo:** [${framework}] ${filePath} (${Math.round(fileSize/1024)}KB)\n\n---\n\n${content}`,
+        },
+      ],
+    };
   }
 
   async smartSearch(query) {
@@ -339,31 +460,36 @@ class FrameworkDocsServer {
       const content = fs.readFileSync(file.fullPath, "utf8");
       
       if (content.toLowerCase().includes(query.toLowerCase())) {
-        // Buscar líneas que contienen el query
-        const lines = content.split('\n');
-        const matchingLines = lines
-          .map((line, index) => ({ line, number: index + 1 }))
-          .filter(({ line }) => line.toLowerCase().includes(query.toLowerCase()))
-          .slice(0, 3); // Máximo 3 líneas por archivo
-
+        const priority = getFilePriority(file.path);
+        const fragment = extractRelevantFragment(content, query);
+        
         results.push({
           framework: file.framework,
           file: file.path,
-          matches: matchingLines,
+          priority,
+          fragment,
+          size: content.length,
         });
       }
     }
+
+    // Ordenar por prioridad y limitar resultados
+    const sortedResults = results
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, 5); // Máximo 5 archivos
 
     const frameworkFilter = framework ? ` en ${framework}` : " en todos los frameworks";
     return {
       content: [
         {
           type: "text",
-          text: `Encontrados ${results.length} archivos con "${query}"${frameworkFilter}:\n\n` +
-            results.map(r => 
-              `**[${r.framework}] ${r.file}**:\n` +
-              r.matches.map(m => `  Línea ${m.number}: ${m.line.trim()}`).join('\n')
-            ).join('\n\n'),
+          text: `📚 **Encontrados ${sortedResults.length} resultados relevantes${frameworkFilter}:**\n\n` +
+            sortedResults.map((r, index) => 
+              `### ${index + 1}. **[${r.framework.toUpperCase()}]** ${r.file}\n` +
+              `${r.fragment}\n` +
+              `*Prioridad: ${r.priority}/10 | Tamaño: ${Math.round(r.size/1024)}KB*\n\n---\n`
+            ).join('\n') +
+            (results.length > 5 ? `\n💡 **Nota:** Se encontraron ${results.length} resultados, mostrando los 5 más relevantes.` : ''),
         },
       ],
     };
@@ -444,17 +570,31 @@ class FrameworkDocsServer {
         content: [
           {
             type: "text",
-            text: `No se encontró la sección "${sectionName}" en ${framework}. Usa la herramienta "list_sections" para ver las secciones disponibles.`,
+            text: `No se encontró la sección "${sectionName}" en el framework "${framework}". Usa la herramienta "list_sections" con el framework adecuado para ver las secciones disponibles.`,
           },
         ],
       };
     }
 
-    let content = `# ${framework} - Sección: ${sectionName}\n\n`;
+    let content = `# Sección: ${sectionName} (${framework})\n\n`;
     
-    for (const file of sectionFiles.slice(0, 10)) { // Limitar a 10 archivos
+    // Ordenar archivos por prioridad
+    const sortedFiles = sectionFiles
+      .map(file => ({
+        ...file,
+        priority: getFilePriority(file.path)
+      }))
+      .sort((a, b) => b.priority - a.priority);
+    
+    // Limitar a máximo 5 archivos para no sobrecargar
+    for (const file of sortedFiles.slice(0, 5)) {
       const fileContent = fs.readFileSync(file.fullPath, "utf8");
       content += `## ${file.path}\n\n${fileContent}\n\n---\n\n`;
+    }
+    
+    // Indicar si hay más archivos
+    if (sortedFiles.length > 5) {
+      content += `\n💡 **Nota:** Se encontraron ${sortedFiles.length} archivos en esta sección, mostrando los 5 más relevantes.`;
     }
 
     return {
@@ -466,19 +606,4 @@ class FrameworkDocsServer {
       ],
     };
   }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    log("🚀 Servidor MCP de Framework Docs iniciado");
-  }
-}
-
-// Iniciar el servidor
-if (require.main === module) {
-  const server = new FrameworkDocsServer();
-  server.run().catch((error) => {
-    log(`❌ Error fatal: ${error.message}`);
-    process.exit(1);
-  });
 }
