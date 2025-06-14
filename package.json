@@ -3,13 +3,14 @@
   "version": "1.0.0",
   "main": "mcp.js",
   "scripts": {
+    "start": "node mcp.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Servidor MCP para documentación de múltiples frameworks",
   "dependencies": {
-    "simple-git": "^3.28.0"
+    "@modelcontextprotocol/sdk": "^1.12.3"
   }
 }
